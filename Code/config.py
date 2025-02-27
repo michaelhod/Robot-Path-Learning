@@ -19,7 +19,7 @@ MODE = 'development'
 # During our evaluation of your algorithm, this will be a random number.
 # If you use a specific number for the seed, the environment will always be the same.
 # Note that for the specific case of SEED = 0, the environment will actually be different each time it is created.
-SEED = 1
+SEED = 0
 
 # Set the size of the window.
 WINDOW_SIZE = 400

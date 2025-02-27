@@ -98,7 +98,8 @@ while training_running:
         break
     # If the action is any other action, do nothing
     else:
-        print(f'Action type {action_type} is invalid.')
+        pass
+        #print(f'Action type {action_type} is invalid.')
     # Draw the environment, and any visualisations, on the window, and step the timer
     graphics.draw(environment, robot.visualisation_lines)
     # Calculate the money spent on time
