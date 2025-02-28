@@ -32,10 +32,10 @@ MIN_RECOVERY_DEMO = 5
 MONEY_DEMO_CUTOFF=13
 NUM_EPOCHS=40
 NUM_RETRAIN_EPOCHS=20
-UNCERTAINTY_STD=0.2
+UNCERTAINTY_STD=0.4
 MAX_ACTION_MAGNITUDE=2
-MOVING_DISTANCE=0.1
-MOVING_QUEUE_LEN=10
+MOVING_DISTANCE=0.2
+MOVING_QUEUE_LEN=75
 
 # The Robot class (which could be called "Agent") is the "brain" of the robot, and is used to decide what action to execute in the environment
 class Robot:
@@ -67,9 +67,10 @@ class Robot:
         recovery_demo_length = (round(money*3/4) - 10)*2
         demo_length = INITIAL_DEMO_LEN if money == STARTING_MONEY else max(min(INITIAL_DEMO_LEN,recovery_demo_length), MIN_RECOVERY_DEMO)
 
-        # If completed, restard
-        if (self.max_reward > 0.1):
+        # If completed, restart
+        if (self.max_reward > -0.5):
             if (money < 5):
+                print(f"Finished training. Money: {money}")
                 return 4, 0
             else:
                 return 2, [0.05, np.random.rand()]
@@ -78,6 +79,7 @@ class Robot:
         if (money - 1 < 10+demo_length*0.5):
             demo_length = max(0, (round(money-1) - 10)*2)
             if(demo_length == 0): #Nothing more to learn
+                print(f"Finished training. Money: {money}")
                 return 4,0
 
         # Request demo at the beginning
@@ -97,20 +99,19 @@ class Robot:
             not_moving = np.mean(self.prev_reward_changes) < MOVING_DISTANCE
             #Hopefully the robot will start moving, so delete movement history
             self.prev_reward_changes = deque(maxlen=MOVING_QUEUE_LEN)
-        not_moving_before_copy = self.not_moving_before
-        self.not_moving_before = not_moving
 
         if (not_moving or uncertain_action) and demo_length > 0:
             # If not moving, give an opportunity to get out before resetting
-            if(not_moving_before_copy and not_moving):
+            if(self.not_moving_before and not_moving):
                 self.not_moving_before = False
+                print(f"Resetting env")
                 return 2, [0.05, np.random.rand()]
-
+            
             action_type = 3
             action_value = [0,demo_length]
-            print(f"Requesting a demo of length {demo_length}. Not_moving:{not_moving}. uncertain_action:{uncertain_action} Money remaining: {money}")
+            print(f"Requesting a demo of length {demo_length}. Not_moving:{not_moving}. Not_moving_before:{self.not_moving_before} uncertain_action:{uncertain_action} Money remaining: {money}")
+            self.not_moving_before = not_moving
             return action_type, action_value
-        
 
         #print(f"Moving in direction {action_value}. Money remaining: {money}")
         if(self.environment):
@@ -199,7 +200,7 @@ class ReplayBuffer:
 class Action_Model:
 
     def __init__(self, model_number):
-        self.network = Network(5, 20, 2)
+        self.network = Network(5, 64, 2)
         self.optimiser = optim.Adam(self.network.parameters(), lr=0.005)
         self.loss_fn = nn.MSELoss()
         self.losses = []
@@ -279,8 +280,8 @@ class Network(nn.Module):
         x = self.activation1(x)
         x = self.hidden2(x)
         x = self.activation2(x)
-        x = self.hidden3(x)
-        x = self.activation3(x)
+        #x = self.hidden3(x)
+        #x = self.activation3(x)
         # Pass data through output layer
         output = self.output(x)
         return output
