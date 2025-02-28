@@ -40,7 +40,7 @@ UNCERTAINTY_STD=0.8
 MAX_ACTION_MAGNITUDE=2
 MOVING_DISTANCE=0.2
 MOVING_QUEUE_LEN=75
-MAX_BUFFER_SIZE=INITIAL_DEMO_LEN+MIN_RECOVERY_DEMO
+MAX_BUFFER_SIZE=INITIAL_DEMO_LEN*2
 
 # The Robot class (which could be called "Agent") is the "brain" of the robot, and is used to decide what action to execute in the environment
 class Robot:
@@ -86,14 +86,14 @@ class Robot:
         if (money - 1 < 10+demo_length*0.5):
             demo_length = max(0, (round(money-1) - 10)*2)
             if(demo_length == 0 and money < 5): #Nothing more to learn
-                print(f"Finished training. Money: {money}. Money spent: {self.money_spent}")
+                #print(f"Finished training. Money: {money}. Money spent: {self.money_spent}")
                 return 4,0
             
 
         # If completed, restart
-        if (self.max_reward > -0.2):
+        if (self.max_reward > -0.1):
             if (money < 5):
-                print(f"Finished training. Money left: {money}. Money spent: {self.money_spent}")
+                #print(f"Finished training. Money left: {money}. Money spent: {self.money_spent}")
                 return 4, 0
             else:
                 self.last_reset= True
@@ -113,7 +113,7 @@ class Robot:
         if (STARTING_MONEY == money):
             action_type = 3
             action_value = [0,demo_length]
-            print(f"Requesting a demo of length {demo_length}. Money remaining: {money}")
+            #print(f"Requesting a demo of length {demo_length}. Money remaining: {money}")
             self.money_spent[3] += 10 + demo_length*0.5
             return action_type, action_value
 
@@ -178,7 +178,7 @@ class Robot:
             # If not moving consecutively, reset
             if(self.not_moving_before and not_moving):
                 self.not_moving_before = False
-                print(f"Resetting env")
+                #print(f"Resetting env")
                 self.last_reset = True
                 self.money_spent[2] += 5
                 self.max_reward = -9999
@@ -187,7 +187,7 @@ class Robot:
             
             action_type = 3
             action_value = [0,demo_length]
-            print(f"Requesting a demo of length {demo_length}. Not_moving:{not_moving}. Not_moving_before:{self.not_moving_before} uncertain_action:{uncertain_action} Money remaining: {money}")
+            #print(f"Requesting a demo of length {demo_length}. Not_moving:{not_moving}. Not_moving_before:{self.not_moving_before} uncertain_action:{uncertain_action} Money remaining: {money}")
             self.not_moving_before = not_moving
             self.money_spent[3] += 10 + demo_length*0.5
             return action_type, action_value
@@ -223,6 +223,9 @@ class Robot:
         change = abs(self.prev_reward - reward)
         self.prev_reward_changes.append(change) # Automatically removes oldest reward
         self.prev_reward = reward
+
+        if change > 0.01 and change < 1:
+            self.buffer_action.add_data(obs, action)
 
         self.max_reward = reward if reward > self.max_reward else self.max_reward
 
@@ -261,7 +264,6 @@ class ReplayBuffer:
             self.features = self.features[10:]
             self.labels = self.labels[10:]
             self.size -= 10
-            print(self.size)
 
     # Create minibatches for a single epoch of training (one epoch means all the training data is seen once)
     def sample_epoch_minibatches(self, minibatch_size):
@@ -291,13 +293,13 @@ class Action_Model:
         self.optimiser = optim.Adam(self.network.parameters(), lr=0.005)
         self.loss_fn = nn.MSELoss()
         self.losses = []
-        self.fig, self.ax = plt.subplots()
-        self.ax.set_xlabel('Num Epochs')
-        self.ax.set_ylabel('Loss')
-        self.ax.set_title(f'Action Loss Curve; NN {model_number}')
-        self.ax.set_yscale('log')
-        self.line, = self.ax.plot([], [], linestyle='-', marker=None, color='blue')
-        plt.show()
+        # self.fig, self.ax = plt.subplots()
+        # self.ax.set_xlabel('Num Epochs')
+        # self.ax.set_ylabel('Loss')
+        # self.ax.set_title(f'Action Loss Curve; NN {model_number}')
+        # self.ax.set_yscale('log')
+        # self.line, = self.ax.plot([], [], linestyle='-', marker=None, color='blue')
+        # plt.show()
 
     def train(self, action_buffer, num_epochs=1):
         for epoch in range(num_epochs):
@@ -318,18 +320,18 @@ class Action_Model:
                 loss_value = loss.item()
                 loss_sum += loss_value
 
-            #plot
-            ave_loss = loss_sum / len(minibatches)
-            self.losses.append(ave_loss)
-                # Plot the loss curve
-            self.line.set_xdata(range(1, len(self.losses) + 1))
-            self.line.set_ydata(self.losses)
-            # Adjust the plot limits
-            self.ax.relim()
-            self.ax.autoscale_view()
-            # Redraw the figure
-            self.fig.canvas.draw()
-            self.fig.canvas.flush_events()
+            # #plot
+            # ave_loss = loss_sum / len(minibatches)
+            # self.losses.append(ave_loss)
+            #     # Plot the loss curve
+            # self.line.set_xdata(range(1, len(self.losses) + 1))
+            # self.line.set_ydata(self.losses)
+            # # Adjust the plot limits
+            # self.ax.relim()
+            # self.ax.autoscale_view()
+            # # Redraw the figure
+            # self.fig.canvas.draw()
+            # self.fig.canvas.flush_events()
 
     def predict_next_action(self, obs):
         input = torch.tensor(obs, dtype=torch.float32)
