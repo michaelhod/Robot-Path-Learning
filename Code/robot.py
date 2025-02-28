@@ -25,13 +25,18 @@ plt.ion()
 # CONFIGURATION PARAMETERS. Add whatever configuration parameters you like here.
 # Remember, you will only be submitting this robot.py file, no other files.
 STARTING_MONEY=0
+MONEY_DEMO_CUTOFF=13
+
 MINIBATCH_SIZE=16
 NUMBER_OF_NN_MODELS=4
-INITIAL_DEMO_LEN = 20
-MIN_RECOVERY_DEMO = 5
-MONEY_DEMO_CUTOFF=13
 NUM_EPOCHS=40
 NUM_RETRAIN_EPOCHS=20
+
+INITIAL_DEMO_LEN = 50
+RESET_DEMO_LEN = 14
+MAX_RECOVERY_DEMO = 20
+MIN_RECOVERY_DEMO = 5
+
 UNCERTAINTY_STD=0.4
 MAX_ACTION_MAGNITUDE=2
 MOVING_DISTANCE=0.2
@@ -57,6 +62,10 @@ class Robot:
         self.prev_reward_changes = deque(maxlen=MOVING_QUEUE_LEN)
         # Minimum reward
         self.max_reward = -9999
+        # Did we reset last time
+        self.last_reset = False
+        # money spent
+        self.money_spent = {1:0,2:0,3:0}
 
     # Get the next training action
     def training_action(self, obs, money):
@@ -65,28 +74,34 @@ class Robot:
         if(STARTING_MONEY == 0): # Set global money parameter
             STARTING_MONEY = money
         recovery_demo_length = (round(money*3/4) - 10)*2
-        demo_length = INITIAL_DEMO_LEN if money == STARTING_MONEY else max(min(INITIAL_DEMO_LEN,recovery_demo_length), MIN_RECOVERY_DEMO)
-
+        demo_length = INITIAL_DEMO_LEN if money == STARTING_MONEY else max(min(MAX_RECOVERY_DEMO,recovery_demo_length), MIN_RECOVERY_DEMO)
+        demo_length = RESET_DEMO_LEN if self.last_reset else demo_length
+        
         # If completed, restart
         if (self.max_reward > -0.5):
             if (money < 5):
-                print(f"Finished training. Money: {money}")
+                print(f"Finished training. Money left: {money}. Money spent: {self.money_spent}")
                 return 4, 0
             else:
+                self.last_reset= True
+                self.money_spent[2] += 5
+                self.max_reward = -9999
                 return 2, [0.05, np.random.rand()]
 
         # If requested demo_length is too expensive, ask for largest demo affordable
         if (money - 1 < 10+demo_length*0.5):
             demo_length = max(0, (round(money-1) - 10)*2)
             if(demo_length == 0): #Nothing more to learn
-                print(f"Finished training. Money: {money}")
+                print(f"Finished training. Money: {money}. Money spent: {self.money_spent}")
                 return 4,0
 
-        # Request demo at the beginning
-        if (STARTING_MONEY == money):
+        # Request demo at the beginning or at a reset
+        if (STARTING_MONEY == money or self.last_reset):
             action_type = 3
             action_value = [0,demo_length]
             print(f"Requesting a demo of length {demo_length}. Money remaining: {money}")
+            self.last_reset = False
+            self.money_spent[3] += 10 + demo_length*0.5
             return action_type, action_value
         
         # Get n actions
@@ -105,18 +120,23 @@ class Robot:
             if(self.not_moving_before and not_moving):
                 self.not_moving_before = False
                 print(f"Resetting env")
+                self.last_reset = True
+                self.money_spent[2] += 5
+                self.max_reward = -9999
                 return 2, [0.05, np.random.rand()]
             
             action_type = 3
             action_value = [0,demo_length]
             print(f"Requesting a demo of length {demo_length}. Not_moving:{not_moving}. Not_moving_before:{self.not_moving_before} uncertain_action:{uncertain_action} Money remaining: {money}")
             self.not_moving_before = not_moving
+            self.money_spent[3] += 10 + demo_length*0.5
             return action_type, action_value
 
         #print(f"Moving in direction {action_value}. Money remaining: {money}")
         if(self.environment):
             nextState = self.environment.dynamics(self.environment.state, action_value)
             self.visualisation_lines.append(VisualisationLine(self.environment.state[0], self.environment.state[1], nextState[0], nextState[1]))
+        self.money_spent[1] += 0.002
         return 1, action_value
 
     def average_action(self, actions):
