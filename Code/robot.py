@@ -33,7 +33,6 @@ NUM_EPOCHS=40
 NUM_RETRAIN_EPOCHS=20
 
 INITIAL_DEMO_LEN = 50
-RESET_DEMO_LEN = 14
 MAX_RECOVERY_DEMO = 20
 MIN_RECOVERY_DEMO = 5
 
@@ -66,6 +65,13 @@ class Robot:
         self.last_reset = False
         # money spent
         self.money_spent = {1:0,2:0,3:0}
+        # Has the beginning been learned
+        self.learning_beginning_state = True
+        self.beginning_learned = False
+        # Beginning state aciton pairs to learn the beginning
+        self.beginning_state = []
+        self.beginning_action_down =[]
+        self.aciton_uncertainty = []
 
     # Get the next training action
     def training_action(self, obs, money):
@@ -75,8 +81,14 @@ class Robot:
             STARTING_MONEY = money
         recovery_demo_length = (round(money*3/4) - 10)*2
         demo_length = INITIAL_DEMO_LEN if money == STARTING_MONEY else max(min(MAX_RECOVERY_DEMO,recovery_demo_length), MIN_RECOVERY_DEMO)
-        demo_length = RESET_DEMO_LEN if self.last_reset else demo_length
-        
+        # If requested demo_length is too expensive, ask for largest demo affordable
+        if (money - 1 < 10+demo_length*0.5):
+            demo_length = max(0, (round(money-1) - 10)*2)
+            if(demo_length == 0): #Nothing more to learn
+                print(f"Finished training. Money: {money}. Money spent: {self.money_spent}")
+                return 4,0
+            
+
         # If completed, restart
         if (self.max_reward > -0.5):
             if (money < 5):
@@ -86,44 +98,88 @@ class Robot:
                 self.last_reset= True
                 self.money_spent[2] += 5
                 self.max_reward = -9999
-                return 2, [0.05, np.random.rand()]
+                return 2, [0.05, 1]
+            
+        # If we haven't yet done a reset but we are running low on money, reset
+        if (money < 10 and not self.beginning_learned):
+            self.last_reset = True
+            self.money_spent[2] += 5
+            return 2, [0.05, 1]
 
-        # If requested demo_length is too expensive, ask for largest demo affordable
-        if (money - 1 < 10+demo_length*0.5):
-            demo_length = max(0, (round(money-1) - 10)*2)
-            if(demo_length == 0): #Nothing more to learn
-                print(f"Finished training. Money: {money}. Money spent: {self.money_spent}")
-                return 4,0
-
-        # Request demo at the beginning or at a reset
-        if (STARTING_MONEY == money or self.last_reset):
+        # Request demo at the beginning
+        if (STARTING_MONEY == money):
             action_type = 3
             action_value = [0,demo_length]
             print(f"Requesting a demo of length {demo_length}. Money remaining: {money}")
-            self.last_reset = False
             self.money_spent[3] += 10 + demo_length*0.5
             return action_type, action_value
-        
+
         # Get n actions
         actions = np.array([model.predict_next_action(obs) for model in self.action_models])
-        action_value, uncertain_action = self.average_action(actions)
+        action_value, uncertain_action, uncertain_value = self.average_action(actions)
+
+        # If we have been reset, move up or down until actions are certain again
+        if (self.last_reset):
+            if (not self.beginning_learned):
+                # 1) Reset to the top. Move all the way down.
+                # 2) Record each state action pair all the way down.
+                # 3) Record which index had the highest certainty action.
+                # 4) Add -1*up[0:i] and down[i:-1] to buffer
+                # 5) Train the model.
+
+                # If we have not yet reached the bottom, move
+                if (len(self.beginning_state) < 2 or not np.array_equal(self.beginning_state[-2], self.beginning_state[-1])):
+                    action_value = [0,-1]
+                    self.beginning_action_down.append(action_value)
+                    self.beginning_state.append(obs)
+                    self.aciton_uncertainty.append(uncertain_value)
+
+                    if(self.environment):
+                        nextState = self.environment.dynamics(self.environment.state, action_value)
+                        self.visualisation_lines.append(VisualisationLine(self.environment.state[0], self.environment.state[1], nextState[0], nextState[1]))
+                    self.money_spent[1] += 0.002
+                    return 1, action_value 
+
+                
+                # Add state acitons to buffer
+                index = np.argmin(self.aciton_uncertainty)
+                self.beginning_action_down = np.array(self.beginning_action_down)
+                self.beginning_state = np.array(self.beginning_state)
+                for i, (state, action) in enumerate(zip(self.beginning_state, self.beginning_action_down)):
+                    if i == index: pass
+                    elif i > index: self.buffer_action.add_data(state, action*-1)
+                    else: self.buffer_action.add_data(state, action)
+
+                #Train 4 NN models
+                for model in self.action_models:
+                    model.train(self.buffer_action, NUM_RETRAIN_EPOCHS)
+                
+                self.beginning_learned = True
+                # Get n actions
+                actions = np.array([model.predict_next_action(obs) for model in self.action_models])
+                action_value, uncertain_action, uncertain_value = self.average_action(actions)
+
+            else:
+                self.last_reset = False
+                
         
-        #if the average reward has not changed, request new action
+        # If the average reward has changed (are we moving)
         not_moving = False
         if(len(self.prev_reward_changes) == MOVING_QUEUE_LEN):
             not_moving = np.mean(self.prev_reward_changes) < MOVING_DISTANCE
             #Hopefully the robot will start moving, so delete movement history
             self.prev_reward_changes = deque(maxlen=MOVING_QUEUE_LEN)
 
+        # If we are not moving or are uncertain, request another demo
         if (not_moving or uncertain_action) and demo_length > 0:
-            # If not moving, give an opportunity to get out before resetting
+            # If not moving consecutively, reset
             if(self.not_moving_before and not_moving):
                 self.not_moving_before = False
                 print(f"Resetting env")
                 self.last_reset = True
                 self.money_spent[2] += 5
                 self.max_reward = -9999
-                return 2, [0.05, np.random.rand()]
+                return 2, [0.05, 1]
             
             action_type = 3
             action_value = [0,demo_length]
@@ -132,7 +188,6 @@ class Robot:
             self.money_spent[3] += 10 + demo_length*0.5
             return action_type, action_value
 
-        #print(f"Moving in direction {action_value}. Money remaining: {money}")
         if(self.environment):
             nextState = self.environment.dynamics(self.environment.state, action_value)
             self.visualisation_lines.append(VisualisationLine(self.environment.state[0], self.environment.state[1], nextState[0], nextState[1]))
@@ -146,14 +201,14 @@ class Robot:
         if(self.environment):
             pass #print angles and straight lines
 
-        return np.mean(actions, axis=0), std > UNCERTAINTY_STD
+        return np.mean(actions, axis=0), std > UNCERTAINTY_STD, std
 
     # Get the next testing action
     def testing_action(self, obs):
         # Predict next observation and reward
         # Get n actions
         actions = np.array([model.predict_next_action(obs) for model in self.action_models])
-        action, uncertain_action = self.average_action(actions) #Get best 3 actions
+        action, _, _ = self.average_action(actions) #Get best 3 actions
         return action
 
     # Receive a transition
