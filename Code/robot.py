@@ -40,6 +40,7 @@ UNCERTAINTY_STD=0.8
 MAX_ACTION_MAGNITUDE=2
 MOVING_DISTANCE=0.2
 MOVING_QUEUE_LEN=75
+MAX_BUFFER_SIZE=INITIAL_DEMO_LEN+MIN_RECOVERY_DEMO
 
 # The Robot class (which could be called "Agent") is the "brain" of the robot, and is used to decide what action to execute in the environment
 class Robot:
@@ -98,13 +99,15 @@ class Robot:
                 self.last_reset= True
                 self.money_spent[2] += 5
                 self.max_reward = -9999
-                return 2, [0.05, 1]
+                y_coord = 1 if not self.beginning_learned else np.random.random()
+                return 2, [0.05, y_coord]
             
         # If we haven't yet done a reset but we are running low on money, reset
         if (money < 10 and not self.beginning_learned):
             self.last_reset = True
             self.money_spent[2] += 5
-            return 2, [0.05, 1]
+            y_coord = 1 if not self.beginning_learned else np.random.random()
+            return 2, [0.05, y_coord]
 
         # Request demo at the beginning
         if (STARTING_MONEY == money):
@@ -129,7 +132,7 @@ class Robot:
 
                 # If we have not yet reached the bottom, move
                 if (len(self.beginning_state) < 2 or not np.array_equal(self.beginning_state[-2], self.beginning_state[-1])):
-                    action_value = [0,-1]
+                    action_value = [0,-MAX_ACTION_MAGNITUDE]
                     self.beginning_action_down.append(action_value)
                     self.beginning_state.append(obs)
                     self.aciton_uncertainty.append(uncertain_value)
@@ -146,7 +149,7 @@ class Robot:
                 self.beginning_action_down = np.array(self.beginning_action_down)
                 self.beginning_state = np.array(self.beginning_state)
                 for i, (state, action) in enumerate(zip(self.beginning_state, self.beginning_action_down)):
-                    if abs(i-index) < 3 or self.aciton_uncertainty[i]<UNCERTAINTY_STD: pass
+                    if abs(i-index) < 5 or self.aciton_uncertainty[i]<0.3: pass
                     elif i > index: self.buffer_action.add_data(state, action*-1)
                     else: self.buffer_action.add_data(state, action)
 
@@ -179,7 +182,8 @@ class Robot:
                 self.last_reset = True
                 self.money_spent[2] += 5
                 self.max_reward = -9999
-                return 2, [0.05, 1]
+                y_coord = 1 if not self.beginning_learned else np.random.random()
+                return 2, [0.05, y_coord]
             
             action_type = 3
             action_value = [0,demo_length]
@@ -190,7 +194,8 @@ class Robot:
 
         if(self.environment):
             nextState = self.environment.dynamics(self.environment.state, action_value)
-            self.visualisation_lines.append(VisualisationLine(self.environment.state[0], self.environment.state[1], nextState[0], nextState[1]))
+            colour = "green" if action_value[1] < 0 else "blue"
+            self.visualisation_lines.append(VisualisationLine(self.environment.state[0], self.environment.state[1], nextState[0], nextState[1], colour=colour))
         self.money_spent[1] += 0.002
         return 1, action_value
 
@@ -208,9 +213,9 @@ class Robot:
         # Predict next observation and reward
         # Get n actions
         actions = np.array([model.predict_next_action(obs) for model in self.action_models])
-        action, uncertain_action, _ = self.average_action(actions) #Get best 3 actions
+        action, uncertain_action, _ = self.average_action(actions)
         if (uncertain_action):
-            action = [1,0] if np.random.random()<0.9 else action
+            action = [MAX_ACTION_MAGNITUDE,0] if np.random.random()<0.9 else action
         return action
 
     # Receive a transition
@@ -252,6 +257,11 @@ class ReplayBuffer:
         self.features.append(state)
         self.labels.append(action)
         self.size += 1
+        if (self.size %MAX_BUFFER_SIZE == 0):
+            self.features = self.features[10:]
+            self.labels = self.labels[10:]
+            self.size -= 10
+            print(self.size)
 
     # Create minibatches for a single epoch of training (one epoch means all the training data is seen once)
     def sample_epoch_minibatches(self, minibatch_size):
