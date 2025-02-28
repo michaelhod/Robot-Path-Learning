@@ -8,7 +8,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from collections import deque
 from matplotlib import pyplot as plt
+from scipy.stats import circstd
 
 # Imports from this project
 # You should not import any other modules, including config.py
@@ -22,10 +24,18 @@ plt.ion()
 
 # CONFIGURATION PARAMETERS. Add whatever configuration parameters you like here.
 # Remember, you will only be submitting this robot.py file, no other files.
-STARTING_MONEY=100
-STARTING_MONEY_SET = False
+STARTING_MONEY=0
 MINIBATCH_SIZE=16
-
+NUMBER_OF_NN_MODELS=4
+INITIAL_DEMO_LEN = 20
+MIN_RECOVERY_DEMO = 5
+MONEY_DEMO_CUTOFF=13
+NUM_EPOCHS=40
+NUM_RETRAIN_EPOCHS=20
+UNCERTAINTY_STD=0.2
+MAX_ACTION_MAGNITUDE=2
+MOVING_DISTANCE=0.1
+MOVING_QUEUE_LEN=10
 
 # The Robot class (which could be called "Agent") is the "brain" of the robot, and is used to decide what action to execute in the environment
 class Robot:
@@ -36,110 +46,121 @@ class Robot:
         self.environment = None
         # A list of visualisations which will be displayed on the bottom half of the window
         self.visualisation_lines = []
-        # Most recent demo provided
-        self.current_demo = []
-        # Current step of demo
-        self.current_step = 0
-        # Number of epochs run to train action model
-        self.action_epoch_count = 0
-        # Buffer for dynamics model
-        self.buffer_dynamics = ReplayBuffer()
         # Buffer for action model
         self.buffer_action = ReplayBuffer()
-        # Dynamics model
-        self.dynamics_model = Dynamics_Model()
-        # Action model
-        self.action_model = Action_Model()
-        # Has action buffer been prepped
-        self.has_prep_action_buffer = False
-        # Last reward recieved
-        self.best_reward = -99999999
+        # Action models
+        self.action_models = [Action_Model(i+1) for i in range(NUMBER_OF_NN_MODELS)]
+        # Random action to get out of uncertainty
+        self.not_moving_before = False
+        # Last 2 rewards
+        self.prev_reward = 0
+        self.prev_reward_changes = deque(maxlen=MOVING_QUEUE_LEN)
+        # Minimum reward
+        self.max_reward = -9999
 
     # Get the next training action
     def training_action(self, obs, money):
-        global STARTING_MONEY, STARTING_MONEY_SET
-
+        global STARTING_MONEY
         #Set the Parameters
-        if(not STARTING_MONEY_SET): # Set global money parameter
+        if(STARTING_MONEY == 0): # Set global money parameter
             STARTING_MONEY = money
-            STARTING_MONEY_SET = True
-        money_demo_cutoff = STARTING_MONEY // 20 # 5
-        demo_length = int (min(20, (40 * money) // STARTING_MONEY)) #Between 20 and 8 
-        train_dynamics_model_every_n_actions = 1
-        dynamics_epochs = 1
-        
-        # Train the model every 20 steps
-        if(self.buffer_dynamics.size > 16 and self.buffer_dynamics.size % train_dynamics_model_every_n_actions == 0):
-            self.dynamics_model.train(self.buffer_dynamics, dynamics_epochs)
+        recovery_demo_length = (round(money*3/4) - 10)*2
+        demo_length = INITIAL_DEMO_LEN if money == STARTING_MONEY else max(min(INITIAL_DEMO_LEN,recovery_demo_length), MIN_RECOVERY_DEMO)
 
-        # If no money left or the last reward was close to endpoint, finish training
-        if(money < 39.5 or self.action_epoch_count > 100):
-            return 4, 0
-        
-        # If not much money, finish demo execution and then train an action model epoch
-        elif(money < money_demo_cutoff or self.best_reward > -0.1):
-            if(len(self.current_demo) > self.current_step):
-                action_type = 1
-                action_value = self.current_demo[self.current_step][1]
-                self.current_step += 1
+        # If completed, restard
+        if (self.max_reward > 0.1):
+            if (money < 5):
+                return 4, 0
             else:
-                if(not self.has_prep_action_buffer):
-                    self.prep_action_buffer()
-                    self.has_prep_action_buffer = True
-                self.action_model.train(self.buffer_action) #Run one epoch of training each time to check money cost
-                self.action_epoch_count += 1
-                return 0, 0
-        
-        # If no demo actions left, choose "Request demo"
-        elif(len(self.current_demo) == self.current_step):
+                return 2, [0.05, np.random.rand()]
+
+        # If requested demo_length is too expensive, ask for largest demo affordable
+        if (money - 1 < 10+demo_length*0.5):
+            demo_length = max(0, (round(money-1) - 10)*2)
+            if(demo_length == 0): #Nothing more to learn
+                return 4,0
+
+        # Request demo at the beginning
+        if (STARTING_MONEY == money):
             action_type = 3
             action_value = [0,demo_length]
-            print(demo_length)
+            print(f"Requesting a demo of length {demo_length}. Money remaining: {money}")
+            return action_type, action_value
+        
+        # Get n actions
+        actions = np.array([model.predict_next_action(obs) for model in self.action_models])
+        action_value, uncertain_action = self.average_action(actions)
+        
+        #if the average reward has not changed, request new action
+        not_moving = False
+        if(len(self.prev_reward_changes) == MOVING_QUEUE_LEN):
+            not_moving = np.mean(self.prev_reward_changes) < MOVING_DISTANCE
+            #Hopefully the robot will start moving, so delete movement history
+            self.prev_reward_changes = deque(maxlen=MOVING_QUEUE_LEN)
+        not_moving_before_copy = self.not_moving_before
+        self.not_moving_before = not_moving
 
-        # If abundant money and still need to run a demo, do action
-        else:
-            action_type = 1
-            action_value = self.current_demo[self.current_step][1]
-            self.current_step += 1
+        if (not_moving or uncertain_action) and demo_length > 0:
+            # If not moving, give an opportunity to get out before resetting
+            if(not_moving_before_copy and not_moving):
+                self.not_moving_before = False
+                return 2, [0.05, np.random.rand()]
 
-        return action_type, action_value
+            action_type = 3
+            action_value = [0,demo_length]
+            print(f"Requesting a demo of length {demo_length}. Not_moving:{not_moving}. uncertain_action:{uncertain_action} Money remaining: {money}")
+            return action_type, action_value
+        
+
+        #print(f"Moving in direction {action_value}. Money remaining: {money}")
+        if(self.environment):
+            nextState = self.environment.dynamics(self.environment.state, action_value)
+            self.visualisation_lines.append(VisualisationLine(self.environment.state[0], self.environment.state[1], nextState[0], nextState[1]))
+        return 1, action_value
+
+    def average_action(self, actions):
+        angles = np.arctan2(actions[:,1], actions[:,0]) #Shape should be (4,)
+        std = circstd(angles)
+        
+        if(self.environment):
+            pass #print angles and straight lines
+
+        return np.mean(actions, axis=0), std > UNCERTAINTY_STD
 
     # Get the next testing action
     def testing_action(self, obs):
         # Predict next observation and reward
-        nextobs_reward = self.dynamics_model.predict_next_obs_and_reward(obs)
-        obs_nextobs_reward = np.append(obs, nextobs_reward)
-        action = self.action_model.predict_next_action(obs_nextobs_reward)
+        # Get n actions
+        actions = np.array([model.predict_next_action(obs) for model in self.action_models])
+        action, uncertain_action = self.average_action(actions) #Get best 3 actions
         return action
 
     # Receive a transition
     def receive_transition(self, obs, action, next_obs, reward):
-        self.best_reward = reward if reward > self.best_reward else self.best_reward
-        
-        inputData = obs
-        outputData = np.append(next_obs, reward)
-        self.buffer_dynamics.add_data(inputData, outputData)
+        change = abs(self.prev_reward - reward)
+        self.prev_reward_changes.append(change) # Automatically removes oldest reward
+        self.prev_reward = reward
+
+        self.max_reward = reward if reward > self.max_reward else self.max_reward
 
     # Receive a new demonstration
     def receive_demo(self, demo):
+        
+        if self.environment:
+            state = self.environment.state
+
         for obs, action in demo:
             self.buffer_action.add_data(obs, action)
-        self.current_demo = demo
-        self.current_step = 0
 
-    def prep_action_buffer(self):
-        temp = ReplayBuffer()
-        
-        for i in range(self.buffer_action.size):
-            obs = self.buffer_action.features[i]
-            labels = self.buffer_action.labels[i]
+            if self.environment:
+                nextState = self.environment.dynamics(state, action)
+                self.visualisation_lines.append(VisualisationLine(state[0], state[1], nextState[0], nextState[1], colour="red"))
+                state=nextState
 
-            nextobs_reward = self.dynamics_model.predict_next_obs_and_reward(obs)
-            feature = np.append(obs, nextobs_reward)
-
-            temp.add_data(feature, labels)
-
-        self.buffer_action = temp
+        #Train 4 NN models
+        for model in self.action_models:
+            epochs = NUM_EPOCHS if len(demo) == INITIAL_DEMO_LEN else NUM_RETRAIN_EPOCHS
+            model.train(self.buffer_action, epochs)
 
 
 # ReplayBuffer class stores transitions
@@ -177,15 +198,15 @@ class ReplayBuffer:
 # Policy is used to predict the next action
 class Action_Model:
 
-    def __init__(self):
-        self.network = Network(11, 50, 2)
+    def __init__(self, model_number):
+        self.network = Network(5, 20, 2)
         self.optimiser = optim.Adam(self.network.parameters(), lr=0.005)
         self.loss_fn = nn.MSELoss()
         self.losses = []
         self.fig, self.ax = plt.subplots()
         self.ax.set_xlabel('Num Epochs')
         self.ax.set_ylabel('Loss')
-        self.ax.set_title('Action Loss Curve')
+        self.ax.set_title(f'Action Loss Curve; NN {model_number}')
         self.ax.set_yscale('log')
         self.line, = self.ax.plot([], [], linestyle='-', marker=None, color='blue')
         plt.show()
@@ -222,66 +243,7 @@ class Action_Model:
             self.fig.canvas.draw()
             self.fig.canvas.flush_events()
 
-    def predict_next_action(self, obs_nextobs_reward):
-        input = torch.tensor(obs_nextobs_reward, dtype=torch.float32)
-        # Set model to evaluation mode
-        self.network.eval()
-        with torch.no_grad():
-            # Forward pass
-            prediction_tensor = self.network(input)
-        # Remove batch dimension and convert to numpy
-        prediction = prediction_tensor.squeeze(0).numpy()
-        return prediction
-
-# Policy is used to predict the next action
-class Dynamics_Model:
-
-    def __init__(self):
-        self.network = Network(5, 20, 6)
-        self.optimiser = optim.Adam(self.network.parameters(), lr=0.005)
-        self.loss_fn = nn.MSELoss()
-        self.losses = []
-        self.fig, self.ax = plt.subplots()
-        self.ax.set_xlabel('Num Epochs')
-        self.ax.set_ylabel('Loss')
-        self.ax.set_title('Dynamics Loss Curve')
-        self.ax.set_yscale('log')
-        self.line, = self.ax.plot([], [], linestyle='-', marker=None, color='blue')
-        plt.show()
-
-    def train(self, dynamics_buffer, num_epochs=1):
-        for epoch in range(num_epochs):
-            loss_sum = 0
-            minibatches = dynamics_buffer.sample_epoch_minibatches(MINIBATCH_SIZE)
-            for inputs, targets in minibatches:
-                # Set the network to training mode
-                self.network.train()
-                # Forward pass: compute predicted next states
-                predictions = self.network.forward(inputs)
-                # Compute the loss
-                loss = self.loss_fn(predictions, targets)
-                # Backward pass and optimization step
-                self.optimiser.zero_grad()
-                loss.backward()
-                self.optimiser.step()
-                # Get the loss value and add to the list of losses
-                loss_value = loss.item()
-                loss_sum += loss_value
-
-            #plot
-            ave_loss = loss_sum / len(minibatches)
-            self.losses.append(ave_loss)
-                # Plot the loss curve
-            self.line.set_xdata(range(1, len(self.losses) + 1))
-            self.line.set_ydata(self.losses)
-            # Adjust the plot limits
-            self.ax.relim()
-            self.ax.autoscale_view()
-            # Redraw the figure
-            self.fig.canvas.draw()
-            self.fig.canvas.flush_events()
-
-    def predict_next_obs_and_reward(self, obs):
+    def predict_next_action(self, obs):
         input = torch.tensor(obs, dtype=torch.float32)
         # Set model to evaluation mode
         self.network.eval()
@@ -322,3 +284,62 @@ class Network(nn.Module):
         # Pass data through output layer
         output = self.output(x)
         return output
+
+# # Policy is used to predict the next action
+# class Dynamics_Model:
+
+#     def __init__(self):
+#         self.network = Network(5, 20, 6)
+#         self.optimiser = optim.Adam(self.network.parameters(), lr=0.005)
+#         self.loss_fn = nn.MSELoss()
+#         self.losses = []
+#         self.fig, self.ax = plt.subplots()
+#         self.ax.set_xlabel('Num Epochs')
+#         self.ax.set_ylabel('Loss')
+#         self.ax.set_title('Dynamics Loss Curve')
+#         self.ax.set_yscale('log')
+#         self.line, = self.ax.plot([], [], linestyle='-', marker=None, color='blue')
+#         plt.show()
+
+#     def train(self, dynamics_buffer, num_epochs=1):
+#         for epoch in range(num_epochs):
+#             loss_sum = 0
+#             minibatches = dynamics_buffer.sample_epoch_minibatches(MINIBATCH_SIZE)
+#             for inputs, targets in minibatches:
+#                 # Set the network to training mode
+#                 self.network.train()
+#                 # Forward pass: compute predicted next states
+#                 predictions = self.network.forward(inputs)
+#                 # Compute the loss
+#                 loss = self.loss_fn(predictions, targets)
+#                 # Backward pass and optimization step
+#                 self.optimiser.zero_grad()
+#                 loss.backward()
+#                 self.optimiser.step()
+#                 # Get the loss value and add to the list of losses
+#                 loss_value = loss.item()
+#                 loss_sum += loss_value
+
+#             #plot
+#             ave_loss = loss_sum / len(minibatches)
+#             self.losses.append(ave_loss)
+#                 # Plot the loss curve
+#             self.line.set_xdata(range(1, len(self.losses) + 1))
+#             self.line.set_ydata(self.losses)
+#             # Adjust the plot limits
+#             self.ax.relim()
+#             self.ax.autoscale_view()
+#             # Redraw the figure
+#             self.fig.canvas.draw()
+#             self.fig.canvas.flush_events()
+
+#     def predict_next_obs_and_reward(self, obs):
+#         input = torch.tensor(obs, dtype=torch.float32)
+#         # Set model to evaluation mode
+#         self.network.eval()
+#         with torch.no_grad():
+#             # Forward pass
+#             prediction_tensor = self.network(input)
+#         # Remove batch dimension and convert to numpy
+#         prediction = prediction_tensor.squeeze(0).numpy()
+#         return prediction
