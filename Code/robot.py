@@ -36,7 +36,6 @@ INITIAL_DEMO_LEN = 50
 MAX_RECOVERY_DEMO = 20
 MIN_RECOVERY_DEMO = 5
 
-BEGINNING_UNCERTAINTY_STD = 0.1
 UNCERTAINTY_STD=0.4
 MAX_ACTION_MAGNITUDE=2
 MOVING_DISTANCE=0.2
@@ -73,8 +72,6 @@ class Robot:
         self.beginning_state = []
         self.beginning_action_down =[]
         self.aciton_uncertainty = []
-        self.beginning_models = [Action_Model(f"Beginning Model {i}") for i in range(3)]
-        self.beginning_buffer = ReplayBuffer()
 
     # Get the next training action
     def training_action(self, obs, money):
@@ -119,13 +116,7 @@ class Robot:
 
         # Get n actions
         actions = np.array([model.predict_next_action(obs) for model in self.action_models])
-        action_value, uncertain_action, uncertain_value = self.average_action(actions, UNCERTAINTY_STD)
-        # See if the beginning actions are uncertain
-        if (uncertain_action):
-            actions = np.array([model.predict_next_action(obs) for model in self.beginning_models])
-            action_candidate, uncertain_beginning_action, _ = self.average_action(actions, BEGINNING_UNCERTAINTY_STD)
-            if (not uncertain_beginning_action):
-                action_value = action_candidate
+        action_value, uncertain_action, uncertain_value = self.average_action(actions)
 
         # If we have been reset, move up or down until actions are certain again
         if (self.last_reset):
@@ -156,14 +147,18 @@ class Robot:
                 self.beginning_state = np.array(self.beginning_state)
                 for i, (state, action) in enumerate(zip(self.beginning_state, self.beginning_action_down)):
                     if i == index: pass
-                    elif i > index: self.beginning_buffer.add_data(state, action*-1)
-                    else: self.beginning_buffer.add_data(state, action)
+                    elif i > index: self.buffer_action.add_data(state, action*-1)
+                    else: self.buffer_action.add_data(state, action)
 
-                #Train NN model
-                for model in self.beginning_models:
-                    model.train(self.beginning_buffer, NUM_EPOCHS)
+                #Train 4 NN models
+                for model in self.action_models:
+                    model.train(self.buffer_action, NUM_RETRAIN_EPOCHS)
                 
                 self.beginning_learned = True
+                # Get n actions
+                actions = np.array([model.predict_next_action(obs) for model in self.action_models])
+                action_value, uncertain_action, uncertain_value = self.average_action(actions)
+
             else:
                 self.last_reset = False
                 
@@ -199,32 +194,21 @@ class Robot:
         self.money_spent[1] += 0.002
         return 1, action_value
 
-    def average_action(self, actions, uncertainty_threshold):
+    def average_action(self, actions):
         angles = np.arctan2(actions[:,1], actions[:,0]) #Shape should be (4,)
         std = circstd(angles)
         
         if(self.environment):
             pass #print angles and straight lines
 
-        return np.mean(actions, axis=0), std > uncertainty_threshold, std
+        return np.mean(actions, axis=0), std > UNCERTAINTY_STD, std
 
     # Get the next testing action
     def testing_action(self, obs):
         # Predict next observation and reward
         # Get n actions
         actions = np.array([model.predict_next_action(obs) for model in self.action_models])
-        action, uncertain_action, _ = self.average_action(actions, UNCERTAINTY_STD) #Get best 3 actions
-        # See if the beginning actions are uncertain
-        if (uncertain_action):
-            actions = np.array([model.predict_next_action(obs) for model in self.beginning_models])
-            action_candidate, uncertain_action, _ = self.average_action(actions, BEGINNING_UNCERTAINTY_STD)
-            if (not uncertain_action):
-                action = action_candidate
-                print("Beginning action")
-            else:
-                print("Normal action")
-
-        
+        action, _, _ = self.average_action(actions) #Get best 3 actions
         return action
 
     # Receive a transition
