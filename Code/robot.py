@@ -149,7 +149,7 @@ class Robot:
                 self.beginning_action_down = np.array(self.beginning_action_down)
                 self.beginning_state = np.array(self.beginning_state)
                 for i, (state, action) in enumerate(zip(self.beginning_state, self.beginning_action_down)):
-                    if abs(i-index) < 5 or self.aciton_uncertainty[i]<0.3: pass
+                    if abs(i-index) < 5 or self.aciton_uncertainty[i]<0.1: pass
                     elif i > index: self.buffer_action.add_data(state, action*-1)
                     else: self.buffer_action.add_data(state, action)
 
